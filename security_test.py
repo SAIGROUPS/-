@@ -16,4 +16,5 @@ def get_config():
     return json.dumps(config)
 
 if __name__ == "__main__":
+    print("Start")
     get_config()
