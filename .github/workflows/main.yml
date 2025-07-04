@@ -1,92 +1,59 @@
-name: Deploy to ECS Fargate
- 
+name: CodeGuru Security Scan
+
+# Triggers the workflow on pushes to any branch and on pull requests to 'main'
 on:
   push:
-    branches:
-      - main
- 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      # Step 1: Checkout the repository
-      - name: Checkout repository
-        uses: actions/checkout@v2
- 
-      # Step 2: Configure AWS credentials (This assumes AWS credentials are set in GitHub Secrets)
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}          
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}  
-          aws-region: eu-west-2  # Set the region for AWS services
- 
-      # Step 3: Configure AWS CLI (for region setup)
-      - name: Configure AWS CLI
-        run: aws configure set region eu-west-2
- 
-      # Step 4: Login to Amazon ECR
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
- 
-      # Step 5: Retrieve current image version from ECR
-      - name: Retrieve current image version
-        id: get-current-version
-        run: |
-          IMAGE_TAG=$(aws ecr describe-images --repository-name coop-saialert-repo --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text)
-          if [[ "$IMAGE_TAG" == "None" ]]; then
-            IMAGE_TAG="v0"
-          fi
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
- 
-      # Step 6: Increment the image version (e.g., v8 -> v9)
-      - name: Increment image version
-        id: increment-version
-        run: |
-          CURRENT_VERSION=${{ env.IMAGE_TAG }}
-          NEW_VERSION="v$(( ${CURRENT_VERSION//v/} + 1 ))"
-          echo "NEW_VERSION=${NEW_VERSION}" >> $GITHUB_ENV
-          echo "New image version: $NEW_VERSION"
- 
-      # Step 7: Build and push Docker image to Amazon ECR
-      - name: Build and push Docker image
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ env.NEW_VERSION }}
-        run: |
-          docker build -f Dockerfile -t $ECR_REGISTRY/coop-saialert-repo:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/coop-saialert-repo:$IMAGE_TAG
-          echo "build-image=$ECR_REGISTRY/coop-saialert-repo:$IMAGE_TAG" >> $GITHUB_OUTPUT
- 
-      # Step 8: Retrieve ECS task definition
-      - name: Retrieve ECS task definition
-        run: |
-          aws ecs describe-task-definition --task-definition coop-sai-alert-task-defination --query taskDefinition --region eu-west-2 > retrieved-task-definition-api.json
-          # Remove unexpected keys like 'enableFaultInjection' from the task definition
-          jq 'del(.compatibilities, .taskDefinitionArn, .requiresAttributes, .revision, .status, .registeredAt, .registeredBy, .enableFaultInjection)' retrieved-task-definition-api.json > modified-task-definition-api.json
- 
-      # Step 9: Update ECS task definition with the new Docker image
-      - name: Fill in the new API image ID in the Amazon ECS task definition
-        id: api-task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: modified-task-definition-api.json
-          container-name: coopsaialertcontainer
-          image: ${{ steps.build-image.outputs.build-image }}
- 
-      # Step 10: Print the modified ECS task definition for debugging
-      - name: Print modified task definition for debugging
-        run: cat modified-task-definition-api.json
- 
-      # Step 11: Deploy ECS task definition to the ECS service
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.api-task-def.outputs.task-definition }}
-          service: coop-saialert-app-service
-          cluster: Coop-SaiAlert_Cluster
-          wait-for-service-stability: true
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "main" ]
+  
+permissions:
+  contents: read
+  security-events: write
 
+jobs:
+  CodeGuru-Scan:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the code from the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Fetches all history for all branches and tags, required by CodeGuru
+          fetch-depth: 0
+
+      # Step 2: Configure AWS credentials using the secrets we stored
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # IMPORTANT: Change this to the AWS region of your S3 bucket
+          aws-region: eu-west-2
+      # Step 3: Run the CodeGuru Reviewer scan
+      - name: Run Amazon CodeGuru Reviewer
+        id: codeguru-review # Add an ID to reference the output of this step
+        uses: aws-actions/codeguru-reviewer@v1.1
+        with:
+          # IMPORTANT: Change this to the name of the S3 bucket you created
+          s3_bucket: "codeguru-reviewer-sai-groups-api"
+
+      # Step 3: Upload results into GitHub
+      - name: Upload review result
+        if: ${{ github.event_name != 'push' }}
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: codeguru-results.sarif.json
+          
+#      # Step 4: Upload the results to GitHub's Security tab
+#      - name: Upload SARIF file
+#        if: success() && steps.codeguru-review.outputs.sarif_file != ''
+#        uses: github/codeql-action/upload-sarif@v3
+#        with:
+#          # Path to the SARIF file generated by the CodeGuru action
+#          sarif_file: ${{ steps.codeguru-review.outputs.sarif_file }}
+#
+#      # Step 5: Inform the user if no report was generated
+#      - name: No report generated
+#        if: success() && steps.codeguru-review.outputs.sarif_file == ''
+#        run: echo "CodeGuru scan completed, but no SARIF report was generated. This is expected if no issues are found."
