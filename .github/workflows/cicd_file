@@ -89,3 +89,4 @@ jobs:
           service: coop-saialert-app-service
           cluster: Coop-SaiAlert_Cluster
           wait-for-service-stability: true
+
